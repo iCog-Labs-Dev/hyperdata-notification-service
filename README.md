@@ -1,31 +1,22 @@
-# Notification Microservice
+# Hyperdata Notification Service
 
-A real-time notification service built with NestJS that integrates with Mahder backend systems. The service consumes notification events from RabbitMQ, persists them in PostgreSQL, and delivers them to users via REST API.
+NestJS worker that consumes notification events from RabbitMQ, stores notification records in the shared PostgreSQL database, and can send push notifications through OneSignal.
 
-## Features
+## How it works
 
-- **RabbitMQ Integration**: Consumes notification events from message queue
-- **Real-time Delivery**: Socket.IO gateway for instant notification push
-- **PostgreSQL Storage**: Persistent notification history with efficient indexing
-- **Health Checks**: Built-in health monitoring for dependencies
-- **Docker Support**: Containerized deployment with optimized Dockerfile
-- **CI/CD Pipeline**: Automated deployment with GitHub Actions
-
-## Table of Contents
-
-- [Architecture](#architecture)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Running the Application](#running-the-application)
-- [CI/CD Pipeline](#cicd-pipeline)
-- [RabbitMQ Message Format](#rabbitmq-message-format)
-- [Notification Types](#notification-types)
-- [Production Deployment](#production-deployment)
-- [Troubleshooting](#troubleshooting)
-
+```text
+Hyperdata backend
+      │ publishes notification.created
+      ▼
+RabbitMQ topic exchange → durable notifications.queue
+                                │
+                                ▼
+                    Notification service
+                      ├─ validates event
+                      ├─ stores notification in PostgreSQL
+                      └─ schedules OneSignal push (optional)
+```
 ## Architecture
-
 ```
 ┌─────────────────┐
 │  Mahder Backend   │
@@ -59,372 +50,152 @@ A real-time notification service built with NestJS that integrates with Mahder b
        └─────────────┘
 ```
 
-## Prerequisites
+The backend remains the application API used by the web and mobile clients. This service currently exposes a root greeting, health check, and Swagger UI; it does not currently register notification REST controllers or a Socket.IO gateway. Do not point client notification-list or read-state calls at this service.
 
-- Node.js 18+ and pnpm
-- PostgreSQL 14+
-- RabbitMQ 3.11+
-- Docker and Docker Compose (optional)
+## Requirements and local setup
 
-## Installation
+- Node.js 20 or later (the Docker image uses Node 20; CI builds with Node 22)
+- pnpm 9
+- PostgreSQL and RabbitMQ reachable from the service
+- A database schema initialized by the Hyperdata backend migrations
+
+Install dependencies and create a local environment file:
 
 ```bash
-# Install dependencies
-pnpm install
-
-# Copy environment template
+pnpm install --frozen-lockfile
 cp .env.example .env
-
-# Edit .env with your configuration
 ```
+
+In PowerShell, use `Copy-Item .env.example .env`. Edit `.env` before starting the service. `DB_URL` must point to the database and schema created by the backend migrations. When running in the shared Docker network, use reachable service names such as `postgres` and `rabbitmq`; `localhost` inside a container refers to that container.
+
+```bash
+pnpm run start:dev
+```
+
+The service listens on `PORT` (default `3002`). This repository does not include a standalone development Compose stack; start PostgreSQL and RabbitMQ separately or use an approved shared development environment.
 
 ## Configuration
 
-### Environment Variables
+`.env.example` documents the configuration names. The variables required by startup validation are:
 
-Create a `.env` file in the root directory with the following variables:
+| Variable | Purpose |
+|---|---|
+| `PORT` | HTTP port; defaults to `3002` |
+| `NODE_ENV` | `development`, `production`, or `test` |
+| `DB_URL` | PostgreSQL connection URL used by TypeORM |
+| `DATABASE_SCHEMA` | Existing PostgreSQL schema used by TypeORM |
+| `RABBITMQ_HOST`, `RABBITMQ_PORT` | RabbitMQ address |
+| `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD` | Dedicated RabbitMQ service credentials |
+| `RABBITMQ_QUEUE` | Durable queue consumed by this worker |
+| `RABBITMQ_EXCHANGE` | Durable topic exchange to bind |
+| `RABBITMQ_ROUTING_KEY` | Binding key; normally `notification.created` |
 
-```env
-# Server Configuration
-PORT=3002
-NODE_ENV=development
+Optional settings:
 
-# Database Configuration
-DB_HOST=localhost
-DB_PORT=5432
-DB_USERNAME=postgres
-DB_PASSWORD=postgres
-DB_DATABASE=notifications
+| Variable | Purpose |
+|---|---|
+| `ONESIGNAL_APP_ID` | OneSignal app identifier; enables push when paired with the REST key |
+| `ONESIGNAL_REST_API_KEY` | Server-side OneSignal credential; never include it in the mobile app or source control |
+| `CORS_ORIGIN` | Explicit trusted browser origin for the HTTP app; set a concrete origin in production |
+| `LOG_LEVEL` | `error`, `warn`, `info`, `debug`, or `verbose` |
+| `JWT_SECRET` | Present in the environment template for shared authentication integrations; it is not needed by the current health/root HTTP routes |
 
-# RabbitMQ Configuration
-RABBITMQ_HOST=localhost
-RABBITMQ_PORT=5672
-RABBITMQ_USERNAME=guest
-RABBITMQ_PASSWORD=guest
-RABBITMQ_QUEUE=notifications.queue
-RABBITMQ_EXCHANGE=notifications.exchange
-RABBITMQ_ROUTING_KEY=notification.created
+`DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD`, and `DB_DATABASE` are also present in the template. TypeORM connects using `DB_URL`; keep the values consistent. Replace all template credentials with unique values for the environment. Use a least-privileged database role and RabbitMQ account, and store production values in the deployment secret store rather than `.env` files in source control.
 
-# JWT Configuration (must match Spring Boot backend)
-JWT_SECRET=your-shared-secret-key
+## RabbitMQ event contract
 
-# CORS Configuration
-CORS_ORIGIN=http://localhost:4200
-
-# Logging
-LOG_LEVEL=info
-```
-
-### Required Variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `PORT` | Server port | `3002` |
-| `DB_HOST` | PostgreSQL host | `localhost` |
-| `DB_PORT` | PostgreSQL port | `5432` |
-| `DB_USERNAME` | Database username | `postgres` |
-| `DB_PASSWORD` | Database password | `postgres` |
-| `DB_DATABASE` | Database name | `notifications` |
-| `RABBITMQ_HOST` | RabbitMQ host | `localhost` |
-| `RABBITMQ_PORT` | RabbitMQ port | `5672` |
-| `RABBITMQ_USERNAME` | RabbitMQ username | `guest` |
-| `RABBITMQ_PASSWORD` | RabbitMQ password | `guest` |
-| `RABBITMQ_QUEUE` | Queue name | `notifications.queue` |
-| `RABBITMQ_EXCHANGE` | Exchange name | `notifications.exchange` |
-| `RABBITMQ_ROUTING_KEY` | Routing key | `notification.created` |
-| `JWT_SECRET` | Shared JWT secret | `your-secret-key` |
-| `CORS_ORIGIN` | Allowed CORS origin | `http://localhost:4200` |
-| `LOG_LEVEL` | Logging level | `info` |
-
-### Logging Configuration
-
-The service uses a structured logging system with correlation ID support for request tracing.
-
-**Log Levels** (from least to most verbose):
-- `error`: Only errors
-- `warn`: Warnings and errors
-- `info`: Informational messages, warnings, and errors (default)
-- `debug`: Debug information and all above
-- `verbose`: All log messages
-
-**Log Format**:
-- **Development**: Human-readable format with timestamps and context
-- **Production**: JSON format for structured logging and log aggregation
-
-**Correlation IDs**:
-- Automatically generated for each HTTP request
-- Can be provided via `x-correlation-id` header
-- Included in all log entries for request tracing
-- Propagated through the entire request lifecycle
-
-**Key Events Logged**:
-- Notification received from RabbitMQ
-- Notification stored in database
-- Notification emitted via Socket.IO
-- RabbitMQ connection events (connected, disconnected, error)
-- Database connection events (connected, disconnected, error)
-- HTTP errors with status codes and stack traces
-
-## Running the Application
-
-### Local Development
-
-```bash
-# Development mode with hot reload
-pnpm run start:dev
-
-# Production mode
-pnpm run build
-pnpm run start:prod
-
-# Debug mode
-pnpm run start:debug
-```
-
-The service will be available at `http://localhost:3002` (or your configured PORT).
-
-## CI/CD Pipeline
-
-### Automated Deployment with GitHub Actions
-
-The project includes a complete CI/CD pipeline that automatically builds and deploys your application.
-
-**Workflow Triggers:**
-- Push to `master` branch → Deploy to production (port 3002)
-- Push to `staging` branch → Deploy to staging (port 3003)
-- Manual trigger from GitHub Actions tab
-
-**Deployment Process:**
-1. Build Docker image
-2. Push to Docker Hub
-3. SSH to server
-4. Pull and deploy new container
-5. Verify health check
-
-**Setup Instructions:**
-
-1. **Configure GitHub Secrets** (see [.github/SECRETS_SETUP.md](.github/SECRETS_SETUP.md)):
-   - Docker Hub credentials
-   - SSH connection details
-   - Environment variables for production and staging
-
-2. **Push to deploy:**
-   ```bash
-   # Deploy to production
-   git push origin master
-
-   # Deploy to staging
-   git push origin staging
-   ```
-
-3. **Monitor deployment:**
-   - Go to Actions tab in GitHub
-   - View workflow progress and logs
-   - Check deployment status
-
-**Documentation:**
-- [CI/CD Setup Guide](.github/README.md) - Quick start
-- [Secrets Configuration](.github/SECRETS_SETUP.md) - Detailed setup
-- [Workflow Diagram](.github/WORKFLOW_DIAGRAM.md) - Visual flow
-
-**Benefits:**
-- ✅ Zero-downtime deployments
-- ✅ Automatic health checks
-- ✅ Environment-specific configurations
-- ✅ Easy rollback capability
-- ✅ Deployment history tracking
-
-### Complete Example
-
-
-## RabbitMQ Message Format
-
-The Spring Boot backend should publish notification events to RabbitMQ in the following format:
-
-### Exchange Configuration
-
-- **Exchange Name**: `notifications.exchange` (configurable via `RABBITMQ_EXCHANGE`)
-- **Exchange Type**: `topic` or `direct`
-- **Routing Key**: `notification.created` (configurable via `RABBITMQ_ROUTING_KEY`)
-- **Queue Name**: `notifications.queue` (configurable via `RABBITMQ_QUEUE`)
-
-### Message Payload
+The consumer subscribes to routing key `notification.created`. On startup, the service attempts to create or verify the durable topic exchange, durable queue, and binding.
 
 ```json
 {
-  "userId": "user-123",
-  "notificationType": "SALE_COMPLETION",
-  "displayName": "Sale Completion",
-  "title":"title",
-  "message":"message",
-  "payload": {
-    "saleId": "12345",
-    "amount": 150.00,
-    "customerName": "John Doe",
-    "branchName": "Main Branch"
-  }
+  "userId": "<backend-user-id>",
+  "notificationType": "task-assign",
+  "title": "Task assigned",
+  "message": "A task is ready for you",
+  "payload": { "taskId": "<task-id>" }
 }
 ```
 
-### Field Descriptions
+| Field | Requirement | Notes |
+|---|---|---|
+| `userId` | Required string | Backend user ID; also used as the OneSignal external user ID |
+| `notificationType` | Required enum | `task-assign`, `task-invitation`, `task-rejected`, or `task-approved` |
+| `title` | Required string | Stored and used as the push heading |
+| `message` | DTO-optional string | Include a non-empty value: the current PostgreSQL entity marks this column non-null, and it is used as the push content |
+| `payload` | Optional object | Currently validated but not persisted or forwarded to OneSignal |
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `userId` | string | Yes | User ID to receive the notification |
-| `notificationType` | string | Yes | One of the supported notification types (see below) |
-| `displayName` | string | Yes | Human-readable notification name |
-| `payload` | object | Yes | Custom data specific to the notification type |
+The backend may include `displayName`; this service does not currently consume it. Keep event fields free of credentials, access tokens, and unnecessary personal information. The consumer currently logs event data, so sensitive values in a message or payload may appear in service logs.
 
-```bash
-# Unit tests
-pnpm run test
+## Processing and delivery behavior
 
-# Unit tests with coverage
-pnpm run test:cov
+- Messages are manually acknowledged after notification persistence succeeds.
+- Invalid events are acknowledged and discarded; inspect validation logs and correct the publisher's event shape.
+- Persistence/processing exceptions are negatively acknowledged with requeue. A dead-letter queue is not configured, so a poison message can be retried repeatedly.
+- A successful database write is the durable notification record. OneSignal delivery is scheduled asynchronously; push failures are logged and do not roll back the record or cause RabbitMQ redelivery.
+- If a message is redelivered after a failure around acknowledgement, the service does not currently use an event idempotency key to deduplicate it. Publishers and operators should account for possible duplicate records when retrying.
 
-# E2E tests
-pnpm run test:e2e
+## OneSignal and the mobile app
 
-# Watch mode
-pnpm run test:watch
-```
+Set both `ONESIGNAL_APP_ID` and `ONESIGNAL_REST_API_KEY` on the notification service to enable pushes. If either is absent, notification persistence continues and push delivery is skipped. The REST API key is server-only.
 
-## Production Deployment
+The Flutter app initializes OneSignal with the same App ID and associates a signed-in user using the backend ID (`OneSignal.login(userId)`). It should call `OneSignal.logout()` when the user signs out. The service targets that external ID and sends `title`, `message`, plus `notificationId` and `notificationType` in the push data. The optional event `payload` is not included. Push acceptance by OneSignal is not proof that a device received or displayed the notification; check the device subscription and OneSignal delivery diagnostics.
 
-### Quick Start
+There is no HTTP endpoint in this service for publishing a test notification. Test through the backend's configured publisher or OneSignal's dashboard with a subscribed test device; do not invent a `/notifications/test/publish` route.
 
-1. **Configure production environment:**
-```bash
-# Copy the template
-cp .env.prod.example .env.prod
+## HTTP endpoints and health
 
-# Edit with your production values
-# Update DB_HOST, RABBITMQ_HOST, JWT_SECRET, CORS_ORIGIN, etc.
-```
+With the default port:
 
-2. **Build and run:**
+- `GET http://localhost:3002/api/` — root greeting
+- `GET http://localhost:3002/api/health` — HTTP and PostgreSQL health check
+- `http://localhost:3002/api/docs` — Swagger UI
 
-**Linux/Mac:**
-```bash
-chmod +x build-and-run.sh
-./build-and-run.sh
-```
+The health check currently verifies PostgreSQL only. A healthy response does not prove RabbitMQ connectivity or OneSignal delivery. Check the logs and service dependencies separately when diagnosing delivery issues.
 
-**Windows:**
-```cmd
-build-and-run.bat
-```
+## Logging and troubleshooting
 
-**Manual Docker commands:**
-```bash
-# Build image
-docker build -t notification-service:latest .
-
-# Run container
-docker run -d \
-  --name notification-service \
-  -p 3002:3002 \
-  --env-file .env.prod \
-  --restart unless-stopped \
-  notification-service:latest
-```
-
-### Production Checklist
-
-Before deploying to production:
-
-- ✅ Update `.env.prod` with production credentials
-- ✅ Use strong passwords for database and RabbitMQ
-- ✅ Set secure JWT_SECRET (minimum 32 characters)
-- ✅ Configure CORS_ORIGIN to your actual domain
-- ✅ Set LOG_LEVEL to 'warn' or 'error'
-- ✅ Ensure PostgreSQL and RabbitMQ are accessible
-- ✅ Configure reverse proxy (Nginx/Apache) if needed
-- ✅ Set up SSL/TLS certificates
-- ✅ Configure firewall rules
-- ✅ Set up monitoring and alerting
-
-### Deployment Guide
-
-See [DEPLOYMENT.md](./DEPLOYMENT.md) for comprehensive production deployment instructions including:
-- Docker deployment options
-- Health monitoring
-- Scaling strategies
-- Nginx reverse proxy configuration
-- Troubleshooting guide
-- Security best practices
-
-## Troubleshooting
-
-### Common Issues
-
-#### 1. Cannot connect to RabbitMQ
-
-**Error:** `Connection refused to RabbitMQ`
-
-**Solution:**
-- Verify RabbitMQ is running: `docker ps` or check service status
-- Check `RABBITMQ_HOST` and `RABBITMQ_PORT` in `.env`
-- Verify credentials are correct
-- Check firewall settings
-
-#### 2. Database connection failed
-
-**Error:** `Unable to connect to the database`
-
-**Solution:**
-- Verify PostgreSQL is running
-- Check `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD` in `.env`
-- Ensure database exists: `CREATE DATABASE notifications;`
-- Check PostgreSQL logs for errors
-
-#### 3. JWT authentication fails
-
-**Error:** `401 Unauthorized`
-
-**Solution:**
-- Verify `JWT_SECRET` matches Spring Boot backend
-- Check token format: `Bearer <token>`
-- Verify token hasn't expired
-- Check token payload contains `sub` or `userId` field
-
-#### 4. Socket.IO connection rejected
-
-**Error:** `Connection rejected`
-
-**Solution:**
-- Verify JWT token is provided in auth handshake or query
-- Check CORS configuration in `.env`
-- Verify client is connecting to correct URL and port
-
-#### 5. Notifications not being received
-
-**Solution:**
-- Check RabbitMQ queue has messages: RabbitMQ Management UI
-- Verify exchange and routing key configuration
-- Check service logs for consumer errors
-- Verify message format matches expected schema
-
-### Logs
-
-View application logs:
+The custom logger supports `error`, `warn`, `info`, `debug`, and `verbose`. Production logs use JSON; consumer events include correlation IDs. Inspect logs without printing `.env` files or secret values:
 
 ```bash
-# Docker
-docker-compose logs -f notification-service
-
-# Local
-# Logs are output to console in development mode
+curl -fsS http://localhost:3002/api/health
+docker logs --tail=100 <notification-container>
 ```
 
-### Health Check
+- **Database connection fails:** verify `DB_URL`, `DATABASE_SCHEMA`, network access, and that backend migrations created the notification table. TypeORM schema synchronization is disabled.
+- **Queue remains empty:** confirm backend and worker use the same exchange, queue, binding key, RabbitMQ virtual host/network, and credentials.
+- **Events are discarded:** check validation messages; use a supported `notificationType` and required fields.
+- **Events repeatedly reappear:** inspect persistence errors and RabbitMQ redelivery; there is no configured dead-letter queue.
+- **No push arrives:** verify both OneSignal server settings, the app's push permission/subscription, and that `userId` matches the mobile user's external ID.
 
-Check service health:
+Do not log tokens or dump entire event payloads to shared terminals when troubleshooting.
+
+## Build, lint, and CI/CD
+
+Available package scripts:
 
 ```bash
-curl http://localhost:3002/api/health
+pnpm run lint
+pnpm run build
+pnpm run start:prod
 ```
 
-## License
+Build the container image with:
 
-This project is licensed under the APACHE License.
+```bash
+docker build -t hyperdata-notification-service:local .
+```
+
+The image still needs the environment values and network access listed above. Production runs it through the shared Compose deployment rather than publishing the notification port directly.
+
+The GitHub Actions workflow runs for pull requests and pushes to `main`, `master`, and `dev`. Lint is advisory (`continue-on-error`); the build is required. A push to `main` deploys the notification service through the shared production deployment script after the build succeeds.
+
+Production runs this service in the backend's shared Docker Compose project and private network. Port `3002` is exposed to that network, not published directly to the host. Production environment values are loaded from the deployment's private `notification.env`; deployments use the `notification` target of `hyperdata-backend/deploy/deploy.sh`.
+
+Useful source references:
+
+- RabbitMQ consumer: [`src/rabbitmq/notification.consumer.ts`](src/rabbitmq/notification.consumer.ts)
+- Event DTO: [`src/notifications/dto/notification-event.dto.ts`](src/notifications/dto/notification-event.dto.ts)
+- Persistence and asynchronous push: [`src/notifications/notifications.service.ts`](src/notifications/notifications.service.ts)
+- OneSignal client: [`src/notifications/services/onesignal.service.ts`](src/notifications/services/onesignal.service.ts)
+- Health check: [`src/health/health.controller.ts`](src/health/health.controller.ts)
+- Production Compose: [`../hyperdata-backend/deploy/docker-compose.production.yml`](../hyperdata-backend/deploy/docker-compose.production.yml)

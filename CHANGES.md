@@ -22,6 +22,12 @@ Section 4(b) of the Apache License, Version 2.0.
 - Added the notification service to the isolated Hyperdata Compose deployment model.
 - Documented shared PostgreSQL/RabbitMQ production configuration and safe side-effect defaults.
 
+## 2026-10-11: Documentation maintenance
+
+- Expanded the README with the current architecture, event contract, ack/retry behavior, configuration, HTTP surface, health semantics, push integration, troubleshooting, and deployment workflow.
+- Consolidated the useful OneSignal setup notes into the README and removed the standalone integration guide.
+- Removed the obsolete queue-logging, RabbitMQ client, and Docker documents as requested.
+
 ## How to record future changes
 - When making non-trivial modifications, add a short entry under a new dated section below
 - Split commits by cohesive behavior or deployable concern, use Conventional Commit messages
